@@ -13,6 +13,10 @@ argumentparser.add_argument("-i", "--input", help="The code input file", type=st
 argumentparser.add_argument("-o", "--output", help="The ASM output file (defaultly outputs to console)", type=str)
 args = argumentparser.parse_args()
 
+if not args.input or not args.output:
+    argumentparser.print_help()
+    sys.exit(0)
+
 logger = logging.Logger("SympthonyScript")
 logging.basicConfig(handlers=(logging.FileHandler(os.path.join(os.path.dirname(__file__), "..", "log", "log " + str(datetime.datetime.now().strftime("%d.%m.%Y %H.%M.%S")) + ".log"), "w"), logging.StreamHandler()))
 try:
