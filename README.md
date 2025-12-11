@@ -4,8 +4,8 @@ A low level language for the Symphony architecture in the game Turing Complete
 Feel free to make own forks, maybe your fork may be featured in the main project!
 
 
-Changelog:
-## V0.0.1: Major bugfixing
+# Changelog:
+### V0.0.1: Major bugfixing
 
 - Fixed logging
 - Fixed if function
