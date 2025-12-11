@@ -8,7 +8,7 @@ import os
 import datetime
 
 argumentparser = argparse.ArgumentParser("ss.py")
-argumentparser.add_argument("-d", "--debug", help="Debug mode, shows more info", type=bool)
+argumentparser.add_argument("-d", "--debug", help="Debug mode, shows more info", action="store_true")
 argumentparser.add_argument("-i", "--input", help="The code input file", type=str)
 argumentparser.add_argument("-o", "--output", help="The ASM output file (defaultly outputs to console)", type=str)
 args = argumentparser.parse_args()
@@ -17,15 +17,27 @@ if not args.input or not args.output:
     argumentparser.print_help()
     sys.exit(0)
 
-logger = logging.Logger("SympthonyScript")
-logging.basicConfig(handlers=(logging.FileHandler(os.path.join(os.path.dirname(__file__), "..", "log", "log " + str(datetime.datetime.now().strftime("%d.%m.%Y %H.%M.%S")) + ".log"), "w"), logging.StreamHandler()))
-try:
-    if args.debug != False:
-        logger.setLevel(logging.DEBUG)
-    else:
-        logger.setLevel(logging.INFO)
-except:
-    logger.setLevel(logging.INFO)
+# -------------------------
+# Logger Setup
+# -------------------------
+logger = logging.getLogger("SymphonyScript")
+logger.setLevel(logging.DEBUG)
+
+# Console handler
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG if args.debug else logging.INFO)
+formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+ch.setFormatter(formatter)
+logger.addHandler(ch)
+
+# File handler
+log_dir = os.path.join(os.path.dirname(__file__), "..", "log")
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log {datetime.datetime.now().strftime('%d.%m.%Y %H.%M.%S')}.log")
+fh = logging.FileHandler(log_file, mode='w')
+fh.setLevel(logging.DEBUG)
+fh.setFormatter(formatter)
+logger.addHandler(fh)
 
 # -------------------------
 # AST Node Definitions
@@ -91,7 +103,7 @@ class VarRef(Expr):
 # -------------------------
 # Lexer + Parser
 # -------------------------
-TOKEN_RE = re.compile(r'\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|<<|>>|==|!=|<=|>=|=|[+\-*/{}();])')
+TOKEN_RE = re.compile(r'\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|<<|>>|==|!=|<=|>=|=|,|[+\-*/{}();])')
 
 class CLexer:
     def __init__(self, code: str):
@@ -108,7 +120,7 @@ class CLexer:
             else:
                 self.tokens.append(('SYM', tok))
         self.tokens.append(('EOF',''))
-        logger.debug('DEBUG TOKENS:', self.tokens)
+        logger.debug('DEBUG TOKENS: ' + str(self.tokens))
 
     def peek(self):
         return self.tokens[self.pos]
@@ -129,7 +141,7 @@ class CParser:
             stmt = self.parse_statement()
             if stmt:
                 stmts.append(stmt)
-        logger.debug('DEBUG AST:', stmts)
+        logger.debug('DEBUG AST: ' + str(stmts))
         return Program(statements=stmts)
 
     def parse_statement(self) -> Optional[Statement]:
@@ -146,8 +158,16 @@ class CParser:
                     value = self.parse_expression()
                 if self.lexer.peek()[1] == ';':
                     self.lexer.next()
-                logger.debug('DEBUG VARDECL:', var_name, value)
+                logger.debug('DEBUG VARDECL: ' + var_name + " " + str(value))
                 return VarDecl(name=var_name, value=value)
+
+            elif self.lexer.peek()[1] == '=':
+                self.lexer.next()
+                value = self.parse_expression()
+                if self.lexer.peek()[1] == ';':
+                    self.lexer.next()
+                logger.debug('DEBUG ASSIGNMENT: ' + ident + " " + str(value))
+                return Assignment(name=ident, value=value)
 
             elif ident == 'if':
                 left = self.parse_expression()
@@ -167,7 +187,7 @@ class CParser:
                     if self.lexer.peek()[1] == '}':
                         self.lexer.next()
                 self.if_counter += 1
-                logger.debug('DEBUG IF:', condition, 'body:', body)
+                logger.debug('DEBUG IF: ' + str(condition) + ' body: ' + str(body))
                 return IfStmt(condition=condition, body=body)
 
             elif ident == 'asm' and self.lexer.peek()[1] == '(':
@@ -178,8 +198,13 @@ class CParser:
                 self.lexer.next()
                 if self.lexer.peek()[1] == ';':
                     self.lexer.next()
-                code_str = ' '.join(code_tokens)
-                logger.debug('DEBUG ASM:', code_str)
+
+                code_str = ''
+                for i, tok in enumerate(code_tokens):
+                    if code_str and tok != ",":
+                        code_str += ' '
+                    code_str += tok
+                logger.debug('DEBUG ASM: ' + code_str)
                 return RawASM(code=code_str)
 
         self.lexer.next()
@@ -209,13 +234,14 @@ mem_addr_counter = 0x1000
 RAM_THRESHOLD = 10
 _if_label_counter = 0
 _func_label_counter = 0
+_if_label_stack: List[str] = []
 
 def use_ram():
     total_vars = len(var_to_reg) + len(var_to_mem)
     return total_vars >= RAM_THRESHOLD
 
 def gen_expr(expr: Expr, target_reg: str) -> List[str]:
-    asm = []
+    asm: List[str] = []
     if isinstance(expr, Number):
         asm.append(f'mov {target_reg}, {expr.value}')
     elif isinstance(expr, VarRef):
@@ -225,6 +251,7 @@ def gen_expr(expr: Expr, target_reg: str) -> List[str]:
             asm.append(f'load_16 {target_reg}, [{var_to_mem[expr.name]}]')
         else:
             asm.append(f'; WARNING: variable {expr.name} not found')
+            logger.warning(f"Variable {expr.name} not found")
     elif isinstance(expr, BinaryOp):
         left_reg, right_reg = 'r1','r2'
         asm += gen_expr(expr.left, left_reg)
@@ -270,16 +297,32 @@ def gen_statement(stmt: Statement) -> List[str]:
             asm += gen_expr(stmt.value, reg)
 
     elif isinstance(stmt, IfStmt):
-        label = f'if_skip{_if_label_counter}'
-        _if_label_counter += 1
-        if isinstance(stmt.condition, BinaryOp) and stmt.condition.op in ('==', '!=', '<', '>', '<=', '>='):
+        # Evaluate condition
+        if isinstance(stmt.condition, BinaryOp):
             asm += gen_expr(stmt.condition.left, 'r1')
             asm += gen_expr(stmt.condition.right, 'r2')
-            op_map = {'==':'jne','=':'jne','!=':'je','<':'jge','<=':'jg','>':'jle','>=':'jl'}
-            asm.append(f'{op_map[stmt.condition.op]} {label}')
-            for s in stmt.body:
-                asm += gen_statement(s)
-            asm.append(f'{label}:')
+            asm.append('cmp r1, r2')
+            opp_map = {
+                '==': 'jne', '=':  'jne', '!=': 'je',
+                '<':  'jge', '<=': 'jg', '>': 'jle', '>=': 'jl'
+            }
+            opp_jump = opp_map.get(stmt.condition.op, 'jne')
+        else:
+            asm += gen_expr(stmt.condition, 'r1')
+            asm.append('cmp r1, 0')
+            opp_jump = 'je'
+
+        label = f"if{_if_label_counter}"
+        _if_label_counter += 1
+        _if_label_stack.append(label)
+
+        asm.append(f"{opp_jump} {label}")
+
+        for s in stmt.body:
+            asm += gen_statement(s)
+
+        popped = _if_label_stack.pop()
+        asm.append(f"{popped}:")
 
     elif isinstance(stmt, FunctionDecl):
         asm.append(f'{stmt.name}:')
@@ -307,7 +350,7 @@ if __name__ == '__main__':
     lexer = CLexer(code)
     parser = CParser(lexer)
     program = parser.parse_program()
-    logger.debug('DEBUG AST:', program)
+    logger.debug('DEBUG AST: ' + str(program))
 
     asm_output = gen_program(program)
     if not args.output:
