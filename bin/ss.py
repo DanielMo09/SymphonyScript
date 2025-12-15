@@ -13,7 +13,7 @@ argumentparser.add_argument("-i", "--input", help="The code input file", type=st
 argumentparser.add_argument("-o", "--output", help="The ASM output file (defaultly outputs to console)", type=str)
 args = argumentparser.parse_args()
 
-if not args.input or not args.output:
+if not args.input:
     argumentparser.print_help()
     sys.exit(0)
 
@@ -23,14 +23,12 @@ if not args.input or not args.output:
 logger = logging.getLogger("SymphonyScript")
 logger.setLevel(logging.DEBUG)
 
-# Console handler
 ch = logging.StreamHandler()
-ch.setLevel(logging.DEBUG if args.debug else logging.INFO)
+ch.setLevel(logging.DEBUG if args.debug else logging.WARNING)
 formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
-# File handler
 log_dir = os.path.join(os.path.dirname(__file__), "..", "log")
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log {datetime.datetime.now().strftime('%d.%m.%Y %H.%M.%S')}.log")
@@ -83,6 +81,10 @@ class ReturnStmt(Statement):
     pass
 
 @dataclass
+class CallStmt(Statement):
+    name: str
+
+@dataclass
 class Expr(Node):
     pass
 
@@ -103,7 +105,7 @@ class VarRef(Expr):
 # -------------------------
 # Lexer + Parser
 # -------------------------
-TOKEN_RE = re.compile(r'\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|<<|>>|==|!=|<=|>=|=|,|[+\-*/{}();])')
+TOKEN_RE = re.compile(r'\s*(\d+|[A-Za-z_][A-Za-z0-9_]*|<<|>>|==|!=|<=|>=|=|,|<|>|[+\-*/{}();])')
 
 class CLexer:
     def __init__(self, code: str):
@@ -141,14 +143,31 @@ class CParser:
             stmt = self.parse_statement()
             if stmt:
                 stmts.append(stmt)
-        logger.debug('DEBUG AST: ' + str(stmts))
+        logger.debug('DEBUG AST: %s', stmts)
         return Program(statements=stmts)
 
     def parse_statement(self) -> Optional[Statement]:
+        global RAM_THRESHOLD
         tok_type, tok_val = self.lexer.peek()
         if tok_type == 'IDENT':
             ident = tok_val
             self.lexer.next()
+
+            # ----------------------
+            # Special: saveRamThreshold(NUMBER)
+            if ident == 'saveRamThreshold' and self.lexer.peek()[1] == '(':
+                self.lexer.next()  # consume '('
+                number_tok = self.lexer.next()
+                if number_tok[0] != 'NUMBER':
+                    raise SyntaxError("Expected number in saveRamThreshold()")
+                RAM_THRESHOLD = int(number_tok[1])
+                if self.lexer.peek()[1] != ')':
+                    raise SyntaxError("Expected ')' in saveRamThreshold()")
+                self.lexer.next()  # consume ')'
+                if self.lexer.peek()[1] == ';':
+                    self.lexer.next()
+                logger.debug('DEBUG CONFIG: RAM_THRESHOLD=%d', RAM_THRESHOLD)
+                return None
 
             if ident == 'int' and self.lexer.peek()[0] == 'IDENT':
                 var_name = self.lexer.next()[1]
@@ -158,7 +177,7 @@ class CParser:
                     value = self.parse_expression()
                 if self.lexer.peek()[1] == ';':
                     self.lexer.next()
-                logger.debug('DEBUG VARDECL: ' + var_name + " " + str(value))
+                logger.debug('DEBUG VARDECL: %s %s', var_name, value)
                 return VarDecl(name=var_name, value=value)
 
             elif self.lexer.peek()[1] == '=':
@@ -166,28 +185,38 @@ class CParser:
                 value = self.parse_expression()
                 if self.lexer.peek()[1] == ';':
                     self.lexer.next()
-                logger.debug('DEBUG ASSIGNMENT: ' + ident + " " + str(value))
+                logger.debug('DEBUG ASSIGNMENT: %s %s', ident, value)
                 return Assignment(name=ident, value=value)
 
             elif ident == 'if':
                 left = self.parse_expression()
-                op_tok = self.lexer.next()
-                if op_tok[1] in ('==', '=', '!=', '<', '>', '<=', '>='):
+                op = None
+                if self.lexer.peek()[1] in ('==', '=', '!=', '<', '>', '<=', '>='):
+                    op = self.lexer.next()[1]
                     right = self.parse_expression()
-                    condition = BinaryOp(op=op_tok[1], left=left, right=right)
+                    condition = BinaryOp(op=op, left=left, right=right)
                 else:
                     condition = left
-                body = []
+
+                body: List[Statement] = []
                 if self.lexer.peek()[1] == '{':
                     self.lexer.next()
-                    while self.lexer.peek()[1] != '}' and self.lexer.peek()[0] != 'EOF':
+                    brace_depth = 1
+                    while brace_depth > 0 and self.lexer.peek()[0] != 'EOF':
+                        if self.lexer.peek()[1] == '{':
+                            brace_depth += 1
+                            self.lexer.next()
+                            continue
+                        if self.lexer.peek()[1] == '}':
+                            brace_depth -= 1
+                            self.lexer.next()
+                            if brace_depth == 0:
+                                break
+                            continue
                         stmt = self.parse_statement()
                         if stmt:
                             body.append(stmt)
-                    if self.lexer.peek()[1] == '}':
-                        self.lexer.next()
-                self.if_counter += 1
-                logger.debug('DEBUG IF: ' + str(condition) + ' body: ' + str(body))
+                logger.debug('DEBUG IF: %s body=%s', condition, body)
                 return IfStmt(condition=condition, body=body)
 
             elif ident == 'asm' and self.lexer.peek()[1] == '(':
@@ -198,14 +227,42 @@ class CParser:
                 self.lexer.next()
                 if self.lexer.peek()[1] == ';':
                     self.lexer.next()
-
-                code_str = ''
-                for i, tok in enumerate(code_tokens):
-                    if code_str and tok != ",":
-                        code_str += ' '
-                    code_str += tok
-                logger.debug('DEBUG ASM: ' + code_str)
+                code_str = ' '.join(code_tokens)
+                logger.debug('DEBUG ASM: %s', code_str)
                 return RawASM(code=code_str)
+
+            elif ident == 'void':
+                name = self.lexer.next()[1]
+                if self.lexer.peek()[1] != '{':
+                    raise SyntaxError('Expected { after function name')
+                self.lexer.next()
+                body: List[Statement] = []
+                brace_depth = 1
+                while brace_depth > 0 and self.lexer.peek()[0] != 'EOF':
+                    if self.lexer.peek()[1] == '{':
+                        brace_depth += 1
+                        self.lexer.next()
+                        continue
+                    if self.lexer.peek()[1] == '}':
+                        brace_depth -= 1
+                        self.lexer.next()
+                        if brace_depth == 0:
+                            break
+                        continue
+                    stmt = self.parse_statement()
+                    if stmt:
+                        body.append(stmt)
+                logger.debug('DEBUG FUNC: %s body=%s', name, body)
+                return FunctionDecl(name=name, body=body)
+
+            elif self.lexer.peek()[1] == '(':
+                self.lexer.next()  # consume '('
+                if self.lexer.peek()[1] != ')':
+                    raise SyntaxError("Expected ) after function call")
+                self.lexer.next()
+                if self.lexer.peek()[1] == ';':
+                    self.lexer.next()
+                return CallStmt(name=ident)
 
         self.lexer.next()
         return None
@@ -233,8 +290,8 @@ reg_index = 4
 mem_addr_counter = 0x1000
 RAM_THRESHOLD = 10
 _if_label_counter = 0
-_func_label_counter = 0
 _if_label_stack: List[str] = []
+_func_vars: List[str] = []
 
 def use_ram():
     total_vars = len(var_to_reg) + len(var_to_mem)
@@ -264,11 +321,14 @@ def gen_expr(expr: Expr, target_reg: str) -> List[str]:
     return asm
 
 def gen_statement(stmt: Statement) -> List[str]:
-    global reg_index, mem_addr_counter, _if_label_counter, _func_label_counter
+    global reg_index, mem_addr_counter, _if_label_counter
     asm: List[str] = []
 
     if isinstance(stmt, RawASM):
         asm.append(stmt.code)
+
+    elif isinstance(stmt, CallStmt):
+        asm.append(f'call {stmt.name}')
 
     elif isinstance(stmt, VarDecl):
         if use_ram():
@@ -297,7 +357,6 @@ def gen_statement(stmt: Statement) -> List[str]:
             asm += gen_expr(stmt.value, reg)
 
     elif isinstance(stmt, IfStmt):
-        # Evaluate condition
         if isinstance(stmt.condition, BinaryOp):
             asm += gen_expr(stmt.condition.left, 'r1')
             asm += gen_expr(stmt.condition.right, 'r2')
@@ -325,6 +384,7 @@ def gen_statement(stmt: Statement) -> List[str]:
         asm.append(f"{popped}:")
 
     elif isinstance(stmt, FunctionDecl):
+        _func_vars.append(stmt.name)
         asm.append(f'{stmt.name}:')
         for s in stmt.body:
             asm += gen_statement(s)
@@ -343,14 +403,12 @@ def gen_program(program: Program) -> List[str]:
     return asm
 
 if __name__ == '__main__':
-    
-    
     with open(args.input, "r") as f:
         code = f.read()
     lexer = CLexer(code)
     parser = CParser(lexer)
     program = parser.parse_program()
-    logger.debug('DEBUG AST: ' + str(program))
+    logger.debug('DEBUG AST: %s', program)
 
     asm_output = gen_program(program)
     if not args.output:
