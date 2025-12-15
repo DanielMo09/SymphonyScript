@@ -1,5 +1,5 @@
 # SymphonyScript
-## DEV BRANCH
+### DEV BRANCH
 ### Use at own risk, many things may be broken!
 A low level language for the Symphony architecture in the game Turing Complete
 
