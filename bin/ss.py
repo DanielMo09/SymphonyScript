@@ -11,7 +11,17 @@ argumentparser = argparse.ArgumentParser("ss.py")
 argumentparser.add_argument("-d", "--debug", help="Debug mode, shows more info", action="store_true")
 argumentparser.add_argument("-i", "--input", help="The code input file", type=str)
 argumentparser.add_argument("-o", "--output", help="The ASM output file (defaultly outputs to console)", type=str)
+argumentparser.add_argument("-c", "--clear", help="Clears all cache and logs", action="store_true")
 args = argumentparser.parse_args()
+
+if args.clear:
+    dirname = os.path.dirname(__file__)
+    log_path = os.path.join(dirname, "../log")
+    for log in os.listdir(log_path):
+        file_path = os.path.join(log_path, log)
+        if str(log).startswith("log") and (os.path.isfile(file_path) or os.path.islink(file_path)):
+            os.unlink(file_path)
+    sys.exit()
 
 if not args.input:
     argumentparser.print_help()
@@ -222,14 +232,22 @@ class CParser:
             elif ident == 'asm' and self.lexer.peek()[1] == '(':
                 self.lexer.next()
                 code_tokens = []
+                code_str = ''
                 while self.lexer.peek()[1] != ')':
                     code_tokens.append(self.lexer.next()[1])
                 self.lexer.next()
                 if self.lexer.peek()[1] == ';':
                     self.lexer.next()
-                code_str = ' '.join(code_tokens)
+                
+                if len(code_tokens) < 1:
+                    return
+                for code_token in code_tokens:
+                    if code_token != ',':
+                        code_str += ' ' + code_token
+                    else:
+                        code_str += code_token
                 logger.debug('DEBUG ASM: %s', code_str)
-                return RawASM(code=code_str)
+                return RawASM(code=code_str.strip())
 
             elif ident == 'void':
                 name = self.lexer.next()[1]
